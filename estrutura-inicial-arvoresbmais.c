@@ -6,7 +6,7 @@
 #include <math.h> // Para a função fabsf (float absolute value) e fseek/ftell
 
 #define COMMAND_MAX_SIZE 100
-#define ORDEM 5 // Ordem B+ Tree (M=5). O nó de índice tem 4 chaves (m) e 5 ponteiros (p). O nó de dados tem 4 entradas (m).
+#define ORDEM 512
 
 /************************************************ ESTRUTURAS DO PARTICIPANTE ************************************************/
 
@@ -35,7 +35,7 @@ typedef struct {
     float nota_red;
 } Participante;
 
-/************************************************ ESTRUTURAS DA ÁRVORE B+ ADAPTADA ************************************************/
+/************************************************ ESTRUTURAS DA ÁRVORE B+ ************************************************/
 
 // Entrada de dados no nó folha (chave é a nota, valor é o índice do registro no arquivo binário)
 typedef struct {
@@ -49,6 +49,7 @@ typedef struct {
     int m; // Quantidade de entradas (máx 4)
     EntradaIndiceNota s[ORDEM - 1]; // Chaves/dados
     int prox; // Ponteiro para a próxima folha (implementação de lista encadeada)
+    int ant;
 } NoDados;
 
 // Nó de Índice (Não-Folha)
@@ -64,6 +65,8 @@ typedef struct No {
 typedef struct {
     int pont_raiz; // Posição do nó raiz no arquivo de índice/dados
     int flag_raiz_folha; // 1 se a raiz é folha (NoDados), 0 se é nó de índice (No)
+    int pont_primeira_folha;
+    int pont_ultima_folha;
 } Metadados;
 
 // Estrutura de Informação de Busca
@@ -104,6 +107,7 @@ NoDados *cria_no_dados() {
     nd->ppai = -1;
     nd->m = 0;
     nd->prox = -1;
+    nd->ant = -1;
     for (int i = 0; i < ORDEM - 1; i++) {
         nd->s[i].nota = -1.0;
         nd->s[i].indice_registro = -1;
@@ -457,6 +461,7 @@ void inserir_bmais(float nota, int indice_registro, FILE *f_metadados, FILE *f_i
 
     Metadados *md = le_metadados(f_metadados);
     EntradaIndiceNota nova_entrada = { .nota = nota, .indice_registro = indice_registro };
+    int p_ultima_folha = md->pont_ultima_folha; // Guarda a posição da última folha antes da inserção/split
 
     if (md->pont_raiz == -1) { // Árvore vazia
         NoDados *nd = cria_no_dados();
@@ -467,6 +472,8 @@ void inserir_bmais(float nota, int indice_registro, FILE *f_metadados, FILE *f_i
 
         md->pont_raiz = nd_pos;
         md->flag_raiz_folha = 1;
+        md->pont_primeira_folha = nd_pos; // Primeira folha
+        md->pont_ultima_folha = nd_pos;   // Última folha
         salva_metadados(md, f_metadados);
 
         free(nd);
@@ -520,10 +527,16 @@ void inserir_bmais(float nota, int indice_registro, FILE *f_metadados, FILE *f_i
             inserir_entrada_em_no_dado(nd2, entradas_aux[j]);
         }
 
-        // Ajusta ponteiros da lista encadeada de folhas
-        nd2->prox = nd->prox;
-        nd1->prox = p_f_dados_original; // nd1 assume a posição original, nd2 vem depois
-        // nd1 (que está na posição original) deve apontar para nd2
+        // Ajusta o encadeamento DUPLO da lista de folhas
+
+        // Ponteiro para o nó que virá DEPOIS do nd2 (originalmente depois do nd)
+        int p_proximo_original = nd->prox;
+
+        nd2->prox = p_proximo_original; // nd2 aponta para quem vinha depois do nd original
+        nd2->ant = p_f_dados_original;  // nd2 aponta para nd1 (posição original)
+
+        nd1->prox = -1; // Sera atualizado após nd2 ser salvo
+        nd1->ant = nd->ant; // nd1 herda o ponteiro anterior do nd original
 
         // Salva nd1 na posição original
         nd1->ppai = nd->ppai;
@@ -534,9 +547,29 @@ void inserir_bmais(float nota, int indice_registro, FILE *f_metadados, FILE *f_i
         salva_no_dados(nd2, f_dados, -1);
         int nd2_pos = (ftell(f_dados) / tamanho_no_dados()) - 1;
 
-        // Atualiza o ponteiro 'prox' do nd1 para nd2
+        // Finaliza encadeamento: Atualiza nd1->prox e o nó que vem depois (p_proximo_original)
+
+        // Atualiza nd1->prox para nd2
         nd1->prox = nd2_pos;
-        salva_no_dados(nd1, f_dados, p_f_dados_original); // Salva novamente com o prox atualizado
+        salva_no_dados(nd1, f_dados, p_f_dados_original);
+
+        // Atualiza o ponteiro 'ant' do nó que vem depois (se ele existir)
+        if (p_proximo_original != -1) {
+            NoDados *nd_proximo = buscar_no_dados(p_proximo_original, f_dados);
+            if (nd_proximo) {
+                nd_proximo->ant = nd2_pos;
+                salva_no_dados(nd_proximo, f_dados, p_proximo_original);
+                free(nd_proximo);
+            }
+        }
+
+        // Atualiza o ponteiro da ÚLTIMA folha nos metadados, se nd2 se tornou a nova última folha
+        if (p_f_dados_original == p_ultima_folha) {
+             Metadados *md_temp = le_metadados(f_metadados);
+             md_temp->pont_ultima_folha = nd2_pos;
+             salva_metadados(md_temp, f_metadados);
+             free(md_temp);
+        }
 
         // Propaga a primeira chave de nd2 para o nó de índice pai
         inserir_em_arquivo_de_indice(nd2->s[0].nota, nd->ppai, 1, p_f_dados_original, nd2_pos, f_metadados, f_indice, f_dados);
@@ -860,6 +893,69 @@ void listar_ordenado(const char* tipo_nota) {
     printf("------------------------------------------------------------------------\n");
 }
 
+// Implementação para listar do maior para o menor (Reverse traversal)
+void listar_ordenado_reverso(const char* tipo_nota) {
+    int index = -1;
+    if (strcmp(tipo_nota, "cn") == 0) index = 0;
+    else if (strcmp(tipo_nota, "ch") == 0) index = 1;
+    else if (strcmp(tipo_nota, "lc") == 0) index = 2;
+    else if (strcmp(tipo_nota, "mt") == 0) index = 3;
+    else if (strcmp(tipo_nota, "red") == 0) index = 4;
+
+    if (index == -1) {
+        printf("Tipo de nota '%s' nao reconhecido.\n", tipo_nota);
+        return;
+    }
+
+    FILE *f_metadados = arvores[index].f_metadados;
+    FILE *f_dados = arvores[index].f_dados;
+    FILE *fp_participantes = fopen(nome_participantes_bin, "rb");
+
+    if (!fp_participantes) {
+        perror("Erro ao abrir arquivo de participantes para leitura");
+        return;
+    }
+
+    Metadados *md = le_metadados(f_metadados);
+    if (!md || md->pont_raiz == -1) {
+        printf("A arvore de nota_%s esta vazia.\n", tipo_nota);
+        free(md);
+        fclose(fp_participantes);
+        return;
+    }
+
+    // A busca começa diretamente pelo ponteiro da ÚLTIMA folha (maior nota)
+    int p_atual = md->pont_ultima_folha;
+
+    printf("------------------------------------------------------------------------\n");
+    printf("Listando participantes ordenados pela NOTA %s (do maior para o menor):\n", tipo_nota);
+    printf("------------------------------------------------------------------------\n");
+
+    int contador = 0;
+    while (p_atual != -1) {
+        NoDados *nd = buscar_no_dados(p_atual, f_dados);
+        if (!nd) break;
+
+        // Iteração reversa no vetor de entradas do nó de dados
+        for (int i = nd->m - 1; i >= 0; i--) {
+            EntradaIndiceNota entrada = nd->s[i];
+            Participante *p = ler_participante_por_indice(fp_participantes, entrada.indice_registro);
+
+            if (p) {
+                printf("%d. Nota %s: %.2f | Indice Registro: %d | Sequencial: %s\n",
+                       ++contador, tipo_nota, entrada.nota, entrada.indice_registro, p->nu_seq);
+                free(p);
+            }
+        }
+
+        p_atual = nd->ant; // Nó ANTERIOR na lista duplamente encadeada
+        free(nd);
+    }
+
+    free(md);
+    fclose(fp_participantes);
+    printf("------------------------------------------------------------------------\n");
+}
 
 void to_lowercase(char *s) {
     for (size_t i = 0; s[i] != '\0'; i++) {
@@ -940,7 +1036,25 @@ int main(void) {
         } else if (strcmp(comando_base, "list") == 0) {
             if (arg[0] != '\0') {
                 to_lowercase(arg);
-                listar_ordenado(arg);
+                printf("\nVoce quer ver os registros ordenados em ordem crescente (1) ou descrescente (2)?\n");
+                if (fgets(comando, COMMAND_MAX_SIZE, stdin) == NULL) continue;
+                size_t len = strlen(comando);
+                if (len > 0 && comando[len-1] == '\n') {
+                    comando[len-1] = '\0';
+                }
+                to_lowercase(comando_base);
+                if (strcmp(comando, "crescente") == 0 || strcmp(comando, "1") == 0)
+                {
+                    listar_ordenado(arg);
+                }
+                else if (strcmp(comando, "decrescente") == 0 || strcmp(comando, "2") == 0)
+                {
+                    listar_ordenado_reverso(arg);
+                }
+                else
+                {
+                    printf("\nArgumento de ordenacao invalido '%s'", comando);
+                }
             } else {
                 printf("Comando LIST requer um argumento (ex: LIST cn, LIST red).\n");
             }
