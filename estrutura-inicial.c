@@ -2,29 +2,13 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdbool.h>
+#include <ctype.h>
 #define COMMAND_MAX_SIZE 100
 #define ORDEM 100
 
 typedef struct {
     int qtd_registros;
 } HeaderParticipantes;
-
-typedef struct {
-    char chave[15];   // nu_seq
-    int indice;       // posição do registro no arquivo binário
-} EntradaFolha;
-
-typedef struct {
-    int eh_folha;
-    int qtd_chaves;
-
-    char chaves[ORDEM][15];    // só roteamento (se for nó interno)
-    int filhos[ORDEM + 1];     // ponteiros para nós filhos (arquivo)
-
-    EntradaFolha dados[ORDEM]; // usado apenas em folha
-
-    int prox_folha; // encadeamento das folhas
-} NoBPlus;
 
 typedef struct {
     float cod_esc;
@@ -103,6 +87,8 @@ int inserir_participante(FILE *fp, HeaderParticipantes *h, Participante *p) {
     fwrite(h, sizeof(HeaderParticipantes), 1, fp);
     fflush(fp);
 
+    //além disso antes de adicionar um participante tem que ter criado aquele outro arquivo de tabela que relaciona cod_esc - cidade - estado
+    // e outro arquivo que relaciona prova - gabarito (considerando a lingua estrangeira na comparação)
     return indice_registro;
 }
 
@@ -217,6 +203,12 @@ void ler_todos_participantes(const char *nome) {
     fclose(fp);
 }
 
+void to_lowercase(char *s) {
+    for (size_t i = 0; s[i] != '\0'; i++) {
+        s[i] = tolower(s[i]);
+    }
+}
+
 
 
 int main(void) {
@@ -228,14 +220,13 @@ int main(void) {
 
         char comando[COMMAND_MAX_SIZE];
         printf("Indique o que voce quer fazer:\nCLEAR - Limpa todo o banco de dados de registros\nREAD - Le um arquivo com registros\nSHOW - Mostra na tela os registros salvos\nEXIT - Sai do programa\n");
-        fgets(comando, COMMAND_MAX_SIZE, stdin);
 
+        fgets(comando, COMMAND_MAX_SIZE, stdin);
         size_t len = strlen(comando);
         if (len > 0 && comando[len-1] == '\n') {
             comando[len-1] = '\0';
         }
-
-        tolower(comando);
+        to_lowercase(comando);
 
         if (strcmp(comando, "clear") == 0)
         {
